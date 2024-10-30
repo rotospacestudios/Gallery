@@ -6,11 +6,10 @@ import json
 from PIL import Image,ImageSequence
 from tkinter import filedialog, Tk
 import uuid
-from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, QLabel, QScrollArea, QVBoxLayout, QWidget, QGridLayout, QHBoxLayout, QMenuBar, QAction, QMenu, QMessageBox, QCheckBox, QDialog, QDialogButtonBox
+from PyQt5.QtWidgets import QLayout,QSizePolicy, QApplication, QMainWindow, QFileDialog, QLabel, QScrollArea, QVBoxLayout, QWidget, QGridLayout, QHBoxLayout, QMenuBar, QAction, QMenu, QMessageBox, QCheckBox, QDialog, QDialogButtonBox
 from PyQt5.QtGui import QPixmap, QImage, QTransform, QPainter, QColor
 from PyQt5.QtCore import QSize, Qt, QEvent, QPropertyAnimation, pyqtProperty, QTimer, QRect
 from PyQt5.QtGui import QMovie
-
 
 
 def resize_image(file_path, resized_path):
@@ -105,8 +104,9 @@ class AnimatedLabel(QLabel):
             self.setFixedSize(300, 300)  # Set a larger default size if the pixmap is invalid
         else:
             window_width = self.parent_widget.width()
-            default_width = int(window_width * 0.4)  # 40% of the window width
-            default_height = int(default_width * (self.original_pixmap.height() / self.original_pixmap.width()))
+            default_width = int(window_width * 0.2)  # Adjust the scalar to control the width
+            aspect_ratio = self.original_pixmap.height() / self.original_pixmap.width()
+            default_height = int(default_width * aspect_ratio)
             self.setFixedSize(default_width, default_height)
 
     def update_pixmap(self):
@@ -234,8 +234,12 @@ class ImageGallery(QMainWindow):
         self.setWindowTitle("Image Gallery")
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)  # Set vertical scroll bar policy
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)  # Set horizontal scroll bar policy
         self.widget = QWidget()
+        self.widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.layout = QGridLayout(self.widget)
+        self.layout.setSizeConstraint(QLayout.SetMinAndMaxSize)
         self.widget.setLayout(self.layout)
         self.scroll_area.setWidget(self.widget)
         self.setCentralWidget(self.scroll_area)
@@ -292,9 +296,16 @@ class ImageGallery(QMainWindow):
             self.display_images()
 
     def display_images(self):
+        # Clear the existing images from the layout
+        for i in reversed(range(self.layout.count())):
+            widget = self.layout.itemAt(i).widget()
+            if widget is not None:
+                widget.setParent(None)
+
         if not self.image_data:
             QMessageBox.warning(self, "No Images Found", "No images were found in the selected folder.")
             return
+
         for item in self.image_data:
             img_path = item["resized"]
             if img_path.lower().endswith('.gif'):
@@ -313,23 +324,47 @@ class ImageGallery(QMainWindow):
             label.setAlignment(Qt.AlignCenter)  # Center the image
             label.setVisible(False)
             self.images.append(label)
+
         self.reposition_images()
 
+    def resize_scroll_area(self):
+        row_heights = [0] * (len(self.images) // self.columns + 1)  # Track the height of each row
+        for index, label in enumerate(self.images):
+            row = index // self.columns
+            row_heights[row] = max(row_heights[row], label.sizeHint().height())
+        total_height = sum(row_heights) + (len(row_heights) * 5)  # Calculate the total height with padding
+        #self.widget.setMinimumHeight(total_height)  # Set the minimum height of the widget
+        self.widget.setFixedSize(self.widget.width(), total_height)  # Set the fixed size of the widget
+        self.scroll_area.setWidget(self.widget)  # Reinitialize the scroll area
+        self.scroll_area.setWidgetResizable(True)  # Ensure the scroll area is resizable
+        self.scroll_area.widget().adjustSize()  # Adjust the size of the scroll area widget
+        self.scroll_area.updateGeometry()  # Update the scroll area geometry
+
     def reposition_images(self):
-        width = self.scroll_area.viewport().width()
-        columns = max(1, width // 350)  # Adjust the column width to reduce padding
-        row_heights = [0] * (len(self.images) // columns + 1)  # Track the height of each row
+        width = self.width()  # Use the ImageGallery width
+        column_width = 300  # Default column width
+        self.columns = max(1, width // column_width)
+        row_heights = [0] * (len(self.images) // self.columns + 1)  # Track the height of each row
+
+        # Clear the existing layout
+        for i in reversed(range(self.layout.count())):
+            widget = self.layout.itemAt(i).widget()
+            if widget is not None:
+                widget.setParent(None)
 
         for index, label in enumerate(self.images):
-            row = index // columns
-            column = index % columns
+            row = index // self.columns
+            column = index % self.columns
             self.layout.addWidget(label, row, column, Qt.AlignCenter)  # Center the images within the grid
             row_heights[row] = max(row_heights[row], label.sizeHint().height())
 
         for row in range(len(row_heights)):
-            self.layout.setRowMinimumHeight(row, row_heights[row])  # Set the minimum height for each row
+            self.layout.setRowMinimumHeight(row, row_heights[row] + 5)  # Set the minimum height for each row with padding
 
+        self.resize_scroll_area()  # Call the new method to resize the scroll area
         self.lazy_load_images()
+
+
 
 
     def lazy_load_images(self):
@@ -375,11 +410,14 @@ class ImageGallery(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.reposition_images()
         self.update_large_image_position()
+        self.scroll_area.widget().adjustSize()  # Adjust the size of the scroll area widget
+
 
     def hide_large_image(self):
         self.large_image_label.hide()
-        
+
     def show_large_image(self, image_path, label):
         if not os.path.exists(image_path):
             print(f"File not found: {image_path}")
@@ -405,7 +443,6 @@ class ImageGallery(QMainWindow):
         original_size = movie.currentImage().size()
         label_size = self.large_image_label.size()
         aspect_ratio = original_size.width() / original_size.height()
-
         if label_size.width() / aspect_ratio <= label_size.height():
             return QSize(label_size.width(), int(label_size.width() / aspect_ratio))
         else:
@@ -414,7 +451,6 @@ class ImageGallery(QMainWindow):
     def update_large_image_position(self, label=None):
         if not hasattr(self, 'large_image_label') or self.large_image_label is None:
             return  # Exit the method if large_image_label doesn't exist
-
         if label and label.isVisible():
             label_rect = label.geometry()
             if label_rect.center().x() > self.width() // 2:
@@ -423,10 +459,9 @@ class ImageGallery(QMainWindow):
                 self.large_image_label.setGeometry(self.width() // 2, 0, self.width() // 2, self.height())
         else:
             self.large_image_label.setGeometry(self.width() // 2, 0, self.width() // 2, self.height())
-        
         # Center the image vertically and horizontally if it's larger
         pixmap = self.large_image_label.pixmap()
-        if pixmap:
+        if (pixmap):
             scaled_pixmap = pixmap.scaled(self.large_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.large_image_label.setPixmap(scaled_pixmap)
             self.large_image_label.setAlignment(Qt.AlignCenter)
