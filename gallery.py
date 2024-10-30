@@ -3,21 +3,33 @@ import os
 import shutil
 import concurrent.futures
 import json
-from PIL import Image
+from PIL import Image,ImageSequence
 from tkinter import filedialog, Tk
 import uuid
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, QLabel, QScrollArea, QVBoxLayout, QWidget, QGridLayout, QHBoxLayout, QMenuBar, QAction, QMenu, QMessageBox, QCheckBox, QDialog, QDialogButtonBox
 from PyQt5.QtGui import QPixmap, QImage, QTransform, QPainter, QColor
-from PyQt5.QtCore import Qt, QEvent, QPropertyAnimation, pyqtProperty, QTimer, QRect
+from PyQt5.QtCore import QSize, Qt, QEvent, QPropertyAnimation, pyqtProperty, QTimer, QRect
+from PyQt5.QtGui import QMovie
+
+
 
 def resize_image(file_path, resized_path):
     # Create a unique dummy file to avoid conflicts
     dummy_file = os.path.join(os.getcwd(), "working_temp_" + str(uuid.uuid4()) + os.path.splitext(file_path)[-1])
     shutil.copy2(file_path, dummy_file)
-    # Resize the dummy file
+
     with Image.open(dummy_file) as img:
-        img.thumbnail((256, 256), Image.LANCZOS)
-        img.save(resized_path)
+        if img.format == 'GIF':
+            frames = []
+            for frame in ImageSequence.Iterator(img):
+                frame = frame.copy()
+                frame.thumbnail((256, 256), Image.LANCZOS)
+                frames.append(frame)
+            frames[0].save(resized_path, save_all=True, append_images=frames[1:], duration=img.info['duration'], loop=img.info.get('loop', 0))
+        else:
+            img.thumbnail((256, 256), Image.LANCZOS)
+            img.save(resized_path)
+
     os.remove(dummy_file)  # Clean up the working file
 
 def process_image(file_path, original_folder, cache_resized_folder, image_data):
@@ -35,6 +47,7 @@ def process_image(file_path, original_folder, cache_resized_folder, image_data):
         "resized": os.path.abspath(resized_path)
     })
     print(f"Resized {file_path} to {resized_path}")
+
 
 def resize_images_and_generate_json(original_folder, cache_resized_folder):
     image_data = []
@@ -56,6 +69,7 @@ def resize_images_and_generate_json(original_folder, cache_resized_folder):
     print(f"JSON file saved at {json_path}")
     return json_path
 
+
 def is_image(file_name):
     image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp']
     _, ext = os.path.splitext(file_name)
@@ -74,6 +88,8 @@ class AnimatedLabel(QLabel):
         self.hovered = False
         self.toggled = False
         self.parent_widget = parent
+        self.movie = None
+        self.set_default_size()
 
     @pyqtProperty(float)
     def scale_factor(self):
@@ -82,8 +98,43 @@ class AnimatedLabel(QLabel):
     @scale_factor.setter
     def scale_factor(self, value):
         self._scale_factor = value
-        transform = QTransform().scale(value, value)
-        self.setPixmap(self.original_pixmap.transformed(transform, Qt.SmoothTransformation))
+        self.update_pixmap()
+
+    def set_default_size(self):
+        if self.original_pixmap.isNull():
+            self.setFixedSize(300, 300)  # Set a larger default size if the pixmap is invalid
+        else:
+            window_width = self.parent_widget.width()
+            default_width = int(window_width * 0.4)  # 40% of the window width
+            default_height = int(default_width * (self.original_pixmap.height() / self.original_pixmap.width()))
+            self.setFixedSize(default_width, default_height)
+
+    def update_pixmap(self):
+        if self.movie:
+            self.movie.setScaledSize(self.calculate_scaled_size(self.movie))
+        else:
+            transform = QTransform().scale(self._scale_factor, self._scale_factor)
+            scaled_pixmap = self.original_pixmap.transformed(transform, Qt.SmoothTransformation)
+            self.setPixmap(scaled_pixmap)
+
+    def setMovie(self, movie):
+        self.movie = movie
+        self.movie.frameChanged.connect(self.update_frame)
+        self.movie.start()
+
+    def update_frame(self):
+        self.setPixmap(self.movie.currentPixmap())
+        self.update_pixmap()  # Ensure the pixmap is updated with the current scale factor
+
+    def calculate_scaled_size(self, movie):
+        original_size = movie.currentImage().size()
+        label_size = self.size()
+        aspect_ratio = original_size.width() / original_size.height()
+
+        if label_size.width() / aspect_ratio <= label_size.height():
+            return QSize(label_size.width(), int(label_size.width() / aspect_ratio))
+        else:
+            return QSize(int(label_size.height() * aspect_ratio), label_size.height())
 
     def enterEvent(self, event):
         if not self.hovered:
@@ -103,7 +154,6 @@ class AnimatedLabel(QLabel):
             self.animation.setStartValue(1.1)
             self.animation.setEndValue(1.0)
             self.animation.start()
-            self.parent_widget.hide_large_image()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -115,9 +165,10 @@ class AnimatedLabel(QLabel):
         if self.toggled:
             painter = QPainter(self)
             painter.setPen(QColor(255, 255, 0))
-            rect = self.pixmap().rect()
-            rect.moveCenter(self.rect().center())
-            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+            if self.pixmap() is not None:
+                rect = self.pixmap().rect()
+                rect.moveCenter(self.rect().center())
+                painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
     def resizeEvent(self, event):
         self.update()
@@ -129,6 +180,7 @@ class AnimatedLabel(QLabel):
     def update(self):
         super().update()
         self.repaint()
+
 
 class NotificationBox(QWidget):
     def __init__(self, parent=None):
@@ -180,7 +232,6 @@ class ImageGallery(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Image Gallery")
-        self.setGeometry(100, 100, 800, 600)
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.widget = QWidget()
@@ -193,7 +244,12 @@ class ImageGallery(QMainWindow):
         self.scroll_area.viewport().installEventFilter(self)
         self.notification_box = NotificationBox(self)
         self.large_image_label = QLabel(self)
-        self.large_image_label.setStyleSheet("background-color: rgba(0, 0, 0, 150);")
+        self.large_image_label.setStyleSheet("""
+            background-color: rgba(0, 0, 0, 150);
+            border: 2px solid white;
+            border-radius: 10px;
+            padding: 10px;
+        """)
         self.large_image_label.hide()
         self.create_menu()
 
@@ -234,20 +290,26 @@ class ImageGallery(QMainWindow):
             data = json.load(file)
             self.image_data = data
             self.display_images()
+
     def display_images(self):
         if not self.image_data:
             QMessageBox.warning(self, "No Images Found", "No images were found in the selected folder.")
             return
-
         for item in self.image_data:
             img_path = item["resized"]
-            img = Image.open(img_path)
-            img.thumbnail((150, 150))
-            img = img.convert("RGBA")
-            data = img.tobytes("raw", "RGBA")
-            qimg = QImage(data, img.width, img.height, QImage.Format_RGBA8888)
-            pixmap = QPixmap.fromImage(qimg)
-            label = AnimatedLabel(pixmap, item["original"], self)
+            if img_path.lower().endswith('.gif'):
+                movie = QMovie(img_path)
+                label = AnimatedLabel(QPixmap(), item["original"], self)
+                label.setMovie(movie)
+                movie.start()
+            else:
+                img = Image.open(img_path)
+                img.thumbnail((200, 200))  # Resize the image to fit within 150x150 pixels
+                img = img.convert("RGBA")
+                data = img.tobytes("raw", "RGBA")
+                qimg = QImage(data, img.width, img.height, QImage.Format_RGBA8888)
+                pixmap = QPixmap.fromImage(qimg)
+                label = AnimatedLabel(pixmap, item["original"], self)
             label.setAlignment(Qt.AlignCenter)  # Center the image
             label.setVisible(False)
             self.images.append(label)
@@ -255,12 +317,20 @@ class ImageGallery(QMainWindow):
 
     def reposition_images(self):
         width = self.scroll_area.viewport().width()
-        columns = max(1, width // 160)
+        columns = max(1, width // 350)  # Adjust the column width to reduce padding
+        row_heights = [0] * (len(self.images) // columns + 1)  # Track the height of each row
+
         for index, label in enumerate(self.images):
             row = index // columns
             column = index % columns
-            self.layout.addWidget(label, row, column)
+            self.layout.addWidget(label, row, column, Qt.AlignCenter)  # Center the images within the grid
+            row_heights[row] = max(row_heights[row], label.sizeHint().height())
+
+        for row in range(len(row_heights)):
+            self.layout.setRowMinimumHeight(row, row_heights[row])  # Set the minimum height for each row
+
         self.lazy_load_images()
+
 
     def lazy_load_images(self):
         viewport_rect = self.scroll_area.viewport().rect()
@@ -274,7 +344,11 @@ class ImageGallery(QMainWindow):
     def reset_hover_states(self, current_label):
         for label in self.images:
             if label != current_label and label.hovered:
-                label.leaveEvent(None)
+                label.hovered = False
+                label.animation.stop()
+                label.animation.setStartValue(1.1)
+                label.animation.setEndValue(1.0)
+                label.animation.start()
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.Resize and source is self.scroll_area.viewport():
@@ -284,6 +358,9 @@ class ImageGallery(QMainWindow):
             self.reset_hover_states(None)
         elif event.type() == QEvent.Scroll and source is self.scroll_area.viewport():
             self.lazy_load_images()
+        elif source == self.large_image_label and event.type() == QEvent.Enter:
+            self.large_image_label.hide()
+            return True
         return super().eventFilter(source, event)
 
     def show_notification(self, image_path, label):
@@ -296,21 +373,49 @@ class ImageGallery(QMainWindow):
             position = 'right'
         self.notification_box.show_notification(f"{folder_name}/{file_name}", position)
 
-    def show_large_image(self, image_path, label):
-        img = Image.open(image_path)
-        img = img.convert("RGBA")
-        data = img.tobytes("raw", "RGBA")
-        qimg = QImage(data, img.width, img.height, QImage.Format_RGBA8888)
-        pixmap = QPixmap.fromImage(qimg)
-        self.large_image_label.setPixmap(pixmap.scaled(self.large_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self.update_large_image_position(label)
-        self.large_image_label.show()
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_large_image_position()
 
     def hide_large_image(self):
         self.large_image_label.hide()
+        
+    def show_large_image(self, image_path, label):
+        if not os.path.exists(image_path):
+            print(f"File not found: {image_path}")
+            return
+        if image_path.lower().endswith('.gif'):
+            movie = QMovie(image_path)
+            self.large_image_label.setMovie(movie)
+            movie.start()
+            # Scale the GIF to fit within the label while maintaining aspect ratio
+            movie.setScaledSize(self.calculate_scaled_size(movie))
+        else:
+            img = Image.open(image_path)
+            img = img.convert("RGBA")
+            data = img.tobytes("raw", "RGBA")
+            qimg = QImage(data, img.width, img.height, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qimg)
+            self.large_image_label.setPixmap(pixmap)
+        self.large_image_label.installEventFilter(self)
+        self.update_large_image_position(label)
+        self.large_image_label.show()
+
+    def calculate_scaled_size(self, movie):
+        original_size = movie.currentImage().size()
+        label_size = self.large_image_label.size()
+        aspect_ratio = original_size.width() / original_size.height()
+
+        if label_size.width() / aspect_ratio <= label_size.height():
+            return QSize(label_size.width(), int(label_size.width() / aspect_ratio))
+        else:
+            return QSize(int(label_size.height() * aspect_ratio), label_size.height())
 
     def update_large_image_position(self, label=None):
-        if label:
+        if not hasattr(self, 'large_image_label') or self.large_image_label is None:
+            return  # Exit the method if large_image_label doesn't exist
+
+        if label and label.isVisible():
             label_rect = label.geometry()
             if label_rect.center().x() > self.width() // 2:
                 self.large_image_label.setGeometry(0, 0, self.width() // 2, self.height())
@@ -318,6 +423,13 @@ class ImageGallery(QMainWindow):
                 self.large_image_label.setGeometry(self.width() // 2, 0, self.width() // 2, self.height())
         else:
             self.large_image_label.setGeometry(self.width() // 2, 0, self.width() // 2, self.height())
+        
+        # Center the image vertically and horizontally if it's larger
+        pixmap = self.large_image_label.pixmap()
+        if pixmap:
+            scaled_pixmap = pixmap.scaled(self.large_image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.large_image_label.setPixmap(scaled_pixmap)
+            self.large_image_label.setAlignment(Qt.AlignCenter)
 
 def main():
     root = Tk()
